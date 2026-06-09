@@ -80,28 +80,55 @@ class Head(nn.Module):
         q = self.query(x) # (B,T,head_size)
 
         # compute attention scores ("affinities")
-        wei = q @ k.transpose(-2, -1) * C**-0.5 # (B,T,head_size) @ (B, head_size, T) -> (B,T,T)
+        wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5 # (B,T,hs) @ (B,hs,T) -> (B,T,T)
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B,T,T)
         wei = F.softmax(wei, dim=-1) # (B,T,T)
 
         v = self.value(x) # (B,T,head_size)
         out = wei @ v # (B,T,T) @ (B,T,head_size) -> (B,T,head_size)
         return out
+    
+class MultiHeadAttention(nn.Module):
+    """ multiple heads of self-attention in parallel """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+
+    def forward(self, x):
+        return torch.cat([h(x) for h in self.heads], dim=-1)
+    
+class FeedForward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, n_embd),
+            nn.ReLU(),
+        )
+
+    def forward(self,x):
+        return self.net(x)
 
 class BigramLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.postional_embedding_table = nn.Embedding(block_size, n_embd)
+        self.positional_embedding_table = nn.Embedding(block_size, n_embd)
+        self.sa_heads = MultiHeadAttention(4, n_embd//4) # i.e. 4 heads of 8-dimensional self attention
+        self.ffwd = FeedForward(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.postional_embedding_table(torch.arange(T, device=idx.device)) # (T,C)
+        pos_emb = self.positional_embedding_table(torch.arange(T, device=idx.device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
+        x = self.sa_heads(x) # (B,T,C)
+        x = self.ffwd(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
